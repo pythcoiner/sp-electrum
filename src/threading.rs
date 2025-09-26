@@ -60,8 +60,8 @@ impl Context {
 pub struct ThreadPool {
     workers: Vec<thread::JoinHandle<()>>,
     sender: mpsc::Sender<Box<dyn FnOnce(Context) -> Context + Send + UnwindSafe + 'static>>,
-    _parking: mpsc::Sender<Context>,
-    _sp_receivers: Arc<Mutex<mpsc::Receiver<Context>>>,
+    _contexts_parking: mpsc::Sender<Context>,
+    _context_pools: Arc<Mutex<mpsc::Receiver<Context>>>,
 }
 
 type Task = Box<dyn FnOnce(Context) -> Context + Send + UnwindSafe + 'static>;
@@ -73,21 +73,21 @@ impl ThreadPool {
 
         let mut workers = Vec::with_capacity(size);
 
-        let (parking, sp_receivers) = mpsc::channel();
-        let sp_receivers = Arc::new(Mutex::new(sp_receivers));
+        let (contexts_parking, conytexts_pool) = mpsc::channel();
+        let contexts_pool = Arc::new(Mutex::new(conytexts_pool));
 
         for _ in 0..size {
             let rx = Arc::clone(&rx);
-            let parking = parking.clone();
-            parking.send(context.clone()).expect("poisoned");
-            let sp_receivers = sp_receivers.clone();
+            let contexts_parking = contexts_parking.clone();
+            contexts_parking.send(context.clone()).expect("poisoned");
+            let contexts_pool = contexts_pool.clone();
 
             workers.push(
                 std::thread::Builder::new()
                     // TODO: verify stack size
                     .stack_size(1024)
                     .spawn(move || loop {
-                        let sp_receiver = sp_receivers
+                        let sp_receiver = contexts_pool
                             .lock()
                             .expect("poisoned")
                             .recv()
@@ -96,7 +96,7 @@ impl ThreadPool {
                             Ok(task) => task,
                             Err(_) => {
                                 // TODO: log
-                                parking.send(sp_receiver).expect("closed");
+                                contexts_parking.send(sp_receiver).expect("closed");
                                 break;
                             }
                         };
@@ -104,7 +104,7 @@ impl ThreadPool {
                         // //     // TODO: log
                         // }
                         let recv = task(sp_receiver);
-                        parking.send(recv).expect("closed");
+                        contexts_parking.send(recv).expect("closed");
                     })
                     .expect("must not fail"),
             );
@@ -112,8 +112,8 @@ impl ThreadPool {
         ThreadPool {
             workers,
             sender: tx,
-            _parking: parking,
-            _sp_receivers: sp_receivers,
+            _contexts_parking: contexts_parking,
+            _context_pools: contexts_pool,
         }
     }
 
