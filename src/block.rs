@@ -46,6 +46,7 @@ pub enum Notification {
     StartBlock(u64 /* block height */),
     Transaction(SpendableTx),
     EndBlock(u64 /* block height */),
+    Aborted(u64 /* aborted height */),
     Error((u64 /* block height */, Error)),
 }
 

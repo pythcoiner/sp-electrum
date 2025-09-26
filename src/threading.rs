@@ -2,6 +2,7 @@ use std::{
     ops::RangeInclusive,
     panic::UnwindSafe,
     sync::{
+        atomic::AtomicBool,
         mpsc::{self},
         Arc, Mutex,
     },
@@ -137,14 +138,16 @@ impl Drop for ThreadPool {
 pub struct Worker {
     pool: ThreadPool,
     context: Context,
+    stop: Arc<AtomicBool>,
 }
 
 impl Worker {
-    pub fn new(threads: usize, context: Context) -> Self {
+    pub fn new(threads: usize, context: Context, stop: Arc<AtomicBool>) -> Self {
         let pool = ThreadPool::new(threads, &context);
         Self {
             pool,
             context: context.clone(),
+            stop,
         }
     }
     pub fn scan(&self, height: u64, notif: mpsc::Sender<Notification>) {
@@ -165,55 +168,73 @@ impl Worker {
 }
 
 pub struct WorkerPool {
-    workers: Arc<Mutex<mpsc::Receiver<Worker>>>,
-    parking: mpsc::Sender<Worker>,
-}
-
-impl Drop for WorkerPool {
-    fn drop(&mut self) {
-        while let Ok(w) = self.workers.lock().expect("poisoned").try_recv() {
-            drop(w);
-        }
-    }
+    tasks: Arc<Mutex<mpsc::Receiver<u64>>>,
+    sender: mpsc::Sender<u64>,
+    notif: Option<mpsc::Receiver<Notification>>,
+    notif_sender: mpsc::Sender<Notification>,
+    stop: Arc<AtomicBool>,
 }
 
 impl WorkerPool {
     pub fn new(workers: usize, threads: usize, context: &Context) -> Self {
         let count = workers;
-        let (parking, workers) = mpsc::channel();
-        let workers = Arc::new(Mutex::new(workers));
+        let (sender, tasks) = mpsc::channel();
+        let (notif_sender, notif) = mpsc::channel();
+        let tasks = Arc::new(Mutex::new(tasks));
+        let stop = Arc::new(AtomicBool::new(false));
+
         for _ in 0..count {
-            let worker = Worker::new(threads, context.clone());
-            parking.send(worker).expect("cannot fail");
+            let tasks = tasks.clone();
+            let worker = Worker::new(threads, context.clone(), stop.clone());
+            let notif = notif_sender.clone();
+            std::thread::Builder::new()
+                // TODO: verify stack size
+                .stack_size(1024)
+                .spawn(move || loop {
+                    if worker.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let height = tasks.lock().expect("poisoned").recv().expect("closed");
+                    worker.scan(height, notif.clone());
+                })
+                .expect("fail to start worker thread");
         }
-        Self { workers, parking }
+        Self {
+            tasks,
+            sender,
+            notif: Some(notif),
+            notif_sender,
+            stop,
+        }
     }
-    fn scan(
-        workers: Arc<Mutex<mpsc::Receiver<Worker>>>,
-        parking: mpsc::Sender<Worker>,
-        height: u64,
-        notif: mpsc::Sender<Notification>,
-    ) {
-        // TODO: verify stack size
-        let _ = std::thread::Builder::new().stack_size(1024).spawn(move || {
-            let worker = workers.lock().expect("poisoned").recv().expect("stopped");
-            worker.scan(height, notif);
-            parking.send(worker).expect("closed");
-        });
+    pub fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut aborted_sent = false;
+        while let Ok(height) = self.tasks.lock().expect("poisoned").try_recv() {
+            if !aborted_sent {
+                self.notif_sender
+                    .send(Notification::Aborted(height))
+                    .expect("closed");
+                aborted_sent = true;
+            } else {
+                // drop remaining heights
+            }
+        }
     }
-    pub fn scan_range(&mut self, range: RangeInclusive<u64>) -> mpsc::Receiver<Notification> {
-        let (sender, receiver) = mpsc::channel();
-        let workers = self.workers.clone();
-        let parking = self.parking.clone();
+    pub fn start(&mut self, range: RangeInclusive<u64>) -> mpsc::Receiver<Notification> {
+        if self.notif.is_none() {
+            panic!("can be start only once")
+        }
+        let task_sender = self.sender.clone();
+        let notif_sender = self.notif_sender.clone();
         std::thread::spawn(move || {
-            sender
+            notif_sender
                 .send(Notification::StartScan(*range.start(), *range.end()))
                 .expect("closed");
             for height in range {
-                let notif = sender.clone();
-                Self::scan(workers.clone(), parking.clone(), height, notif);
+                task_sender.send(height).expect("closed");
             }
         });
-        receiver
+        self.notif.take().expect("checked")
     }
 }
