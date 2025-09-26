@@ -42,10 +42,11 @@ pub struct SpendableTx {
 }
 
 pub enum Notification {
-    Start(u64),
+    StartScan(u64 /* start height */, u64 /* stop height */),
+    StartBlock(u64 /* block height */),
     Transaction(SpendableTx),
-    End(u64),
-    Error((u64, Error)),
+    EndBlock(u64 /* block height */),
+    Error((u64 /* block height */, Error)),
 }
 
 pub enum TxOutRequest {
@@ -53,7 +54,6 @@ pub enum TxOutRequest {
     TxOut(OutPoint, TxOut),
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn block_scan(
     pool: &ThreadPool,
     height: u64,
@@ -61,7 +61,9 @@ pub fn block_scan(
     notif: mpsc::Sender<Notification>,
     context: &Context,
 ) {
-    notif.send(Notification::Start(height)).expect("closed");
+    notif
+        .send(Notification::StartBlock(height))
+        .expect("closed");
 
     let (_, txs) = block_select_eligible_transactions(height, block, context.dust);
 
@@ -134,9 +136,9 @@ pub fn block_scan(
     loop {
         threads += receiver.recv().expect("closed");
         if threads == 0 {
-            return;
+            break;
         }
     }
 
-    // TODO: notify end of block scanned after all tx scanned
+    notif.send(Notification::EndBlock(height)).expect("closed");
 }

@@ -148,6 +148,9 @@ impl Worker {
         }
     }
     pub fn scan(&self, height: u64, notif: mpsc::Sender<Notification>) {
+        notif
+            .send(Notification::StartBlock(height))
+            .expect("closed");
         let block = match self.context.client.get_block(height) {
             Ok(b) => b,
             Err(_) => {
@@ -157,7 +160,6 @@ impl Worker {
                 return;
             }
         };
-
         block::block_scan(&self.pool, height, block, notif, &self.context);
     }
 }
@@ -204,6 +206,9 @@ impl WorkerPool {
         let workers = self.workers.clone();
         let parking = self.parking.clone();
         std::thread::spawn(move || {
+            sender
+                .send(Notification::StartScan(*range.start(), *range.end()))
+                .expect("closed");
             for height in range {
                 let notif = sender.clone();
                 Self::scan(workers.clone(), parking.clone(), height, notif);
