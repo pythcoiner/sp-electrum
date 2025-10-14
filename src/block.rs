@@ -77,7 +77,7 @@ pub fn block_scan(
                 let op = tx.input[i].previous_output;
                 let sender = sender.clone();
                 let notif = notif.clone();
-                pool.execute(move |c| {
+                pool.execute(move |mut c| {
                     sender.send(TxOutRequest::OutPoint).expect("poisoned");
                     let vout = match c.client.get_outpoint(op, height) {
                         Ok(vout) => vout,

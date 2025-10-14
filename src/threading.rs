@@ -150,7 +150,7 @@ impl Worker {
             stop,
         }
     }
-    pub fn scan(&self, height: u64, notif: mpsc::Sender<Notification>) {
+    pub fn scan(&mut self, height: u64, notif: mpsc::Sender<Notification>) {
         notif
             .send(Notification::StartBlock(height))
             .expect("closed");
@@ -185,7 +185,7 @@ impl WorkerPool {
 
         for _ in 0..count {
             let tasks = tasks.clone();
-            let worker = Worker::new(threads, context.clone(), stop.clone());
+            let mut worker = Worker::new(threads, context.clone(), stop.clone());
             let notif = notif_sender.clone();
             std::thread::Builder::new()
                 // TODO: verify stack size

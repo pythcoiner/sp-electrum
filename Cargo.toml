@@ -4,5 +4,14 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
+bwk-electrum = "0.0.4"
+dns-lookup = "3.0.0"
 miniscript = "12.3.5"
+serde_json = "1.0.145"
 silentpayments = { path = "../rust-silentpayments/" }
+
+bitcoin_local = {path = "../rust-bitcoin/bitcoin/", package = "bitcoin"}
+bitcoin-p2p-messages = {path = "../rust-bitcoin/p2p/"}
+thiserror = "2.0.17"
+rand = "0.9.2"
+bwk-backoff = "0.0.3"
