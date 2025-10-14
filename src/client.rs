@@ -6,5 +6,5 @@ use miniscript::bitcoin::{Block, OutPoint, TxOut};
 pub trait BlockChainClient: Send + UnwindSafe + 'static {
     fn clone(&self) -> Box<dyn BlockChainClient>;
     fn get_block(&self, height: u64) -> Result<Block, ()>;
-    fn get_outpoint(&self, op: OutPoint) -> Result<TxOut, ()>;
+    fn get_outpoint(&self, op: OutPoint, block_height: u64) -> Result<TxOut, ()>;
 }

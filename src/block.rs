@@ -78,7 +78,7 @@ pub fn block_scan(
                 let notif = notif.clone();
                 pool.execute(move |c| {
                     sender.send(TxOutRequest::OutPoint).expect("poisoned");
-                    let vout = match c.client.get_outpoint(op) {
+                    let vout = match c.client.get_outpoint(op, height) {
                         Ok(vout) => vout,
                         Err(_) => {
                             notif
