@@ -35,6 +35,7 @@ pub fn block_select_eligible_transactions(
     (height, out)
 }
 
+#[derive(Clone)]
 pub struct SpendableTx {
     pub height: u64,
     pub tx: Transaction,
