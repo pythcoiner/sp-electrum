@@ -1,6 +1,9 @@
 pub mod client;
 pub mod dns;
 
+#[allow(unused)]
+pub use client::Client;
+
 use std::{
     io::{BufReader, Write},
     net::{SocketAddr, TcpStream},

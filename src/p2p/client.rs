@@ -17,6 +17,7 @@ use bitcoin::p2p::{
 };
 use bitcoin::{consensus::encode, Block, BlockHash, Network};
 
+#[derive(Debug)]
 pub struct Client {
     address: SocketAddr,
     network: Network,
@@ -24,6 +25,19 @@ pub struct Client {
     stream: Option<Arc<Mutex<TcpStream>>>,
     receiver: Option<mpsc::Receiver<NetworkMessage>>,
     stop: Arc<AtomicBool>,
+}
+
+impl Clone for Client {
+    fn clone(&self) -> Self {
+        Self {
+            address: self.address,
+            network: self.network,
+            timeout: self.timeout,
+            stream: None,
+            receiver: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl Client {
