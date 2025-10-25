@@ -13,7 +13,7 @@ pub const DNS_SEED_SERVERS: [&str; 9] = [
     "seed.mainnet.achownodes.xyz.",
 ];
 
-fn fetch_bitcoin_peers(dns_seed: &str) -> Result<Vec<SocketAddr>, String> {
+pub fn fetch_bitcoin_peers(dns_seed: &str) -> Result<Vec<SocketAddr>, String> {
     match lookup_host(dns_seed) {
         Ok(ips) => {
             let peers: Vec<SocketAddr> = ips

@@ -2,37 +2,30 @@ pub mod client;
 pub mod dns;
 
 use std::{
-    io::{self, BufReader, Write},
+    io::{BufReader, Write},
     net::{SocketAddr, TcpStream},
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bitcoin_local::{
+use bitcoin::p2p::{
+    address,
+    message::{self, NetworkMessage},
+    message_network::VersionMessage,
+    Magic, ServiceFlags,
+};
+use bitcoin::{
     consensus::{encode, Decodable},
     Network,
 };
-use bitcoin_p2p_messages::{
-    address, message,
-    message_network::{self, ClientSoftwareVersion, UserAgent, UserAgentVersion},
-    Magic, ProtocolVersion, ServiceFlags,
-};
 use thiserror::Error;
-
-const SOFTWARE_VERSION: ClientSoftwareVersion = ClientSoftwareVersion::SemVer {
-    major: 0,
-    minor: 0,
-    revision: 0,
-};
-const USER_AGENT_VERSION: UserAgentVersion = UserAgentVersion::new(SOFTWARE_VERSION);
-const SOFTWARE_NAME: &str = "sp-client";
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Invalid peer address")]
     InvalidAddress,
     #[error("Fail to open TCP stream: {0:?}")]
-    TcpConnect(io::Error),
+    TcpConnect(std::io::Error),
     #[error("Peer response is wrong")]
     WrongPeerResponse,
     #[error("Fail to decode peer response")]
@@ -43,16 +36,15 @@ pub enum Error {
     LocalAddress,
     #[error("The P2P client is not connected")]
     Connected,
+    #[error("The client stopped unexpectedly")]
+    Stopped,
 }
 
 pub fn network_to_magic(network: Network) -> Magic {
     match network {
         Network::Bitcoin => Magic::BITCOIN,
-        Network::Testnet(v) => match v {
-            bitcoin_local::TestnetVersion::V3 => Magic::TESTNET3,
-            bitcoin_local::TestnetVersion::V4 => Magic::TESTNET4,
-            _ => unreachable!("unknown testnet"),
-        },
+        Network::Testnet => Magic::TESTNET3,
+        Network::Testnet4 => Magic::TESTNET4,
         Network::Signet => Magic::SIGNET,
         Network::Regtest => Magic::REGTEST,
     }
@@ -83,18 +75,17 @@ fn connect(
         let reply =
             message::RawNetworkMessage::consensus_decode(&mut reader).map_err(|_| Error::Decode)?;
         match reply.payload() {
-            message::NetworkMessage::Version(v) => {
+            NetworkMessage::Version(v) => {
                 start_height = v.start_height;
                 version = true;
             }
-            message::NetworkMessage::Verack => {
+            NetworkMessage::Verack => {
                 verack = true;
             }
             _ => { /* we just ignore other messages */ }
         }
         if version && verack {
-            let verack_msg =
-                message::RawNetworkMessage::new(magic, message::NetworkMessage::Verack);
+            let verack_msg = message::RawNetworkMessage::new(magic, NetworkMessage::Verack);
             let _ = stream.write_all(encode::serialize(&verack_msg).as_slice());
             break;
         }
@@ -102,9 +93,7 @@ fn connect(
     Ok((stream, reader, start_height))
 }
 
-fn version_msg(own_ip: SocketAddr, peer_ip: SocketAddr) -> message::NetworkMessage {
-    let protocol_version = ProtocolVersion::from_nonstandard(60_002);
-
+fn version_msg(own_ip: SocketAddr, peer_ip: SocketAddr) -> NetworkMessage {
     let services = ServiceFlags::NONE;
 
     let timestamp = SystemTime::now()
@@ -118,13 +107,14 @@ fn version_msg(own_ip: SocketAddr, peer_ip: SocketAddr) -> message::NetworkMessa
 
     let nonce: u64 = rand::random();
 
-    // "The last block received by the emitting node"
+    // The last block received by the emitting node
     let start_height: i32 = 0;
 
-    let user_agent = UserAgent::new(SOFTWARE_NAME, USER_AGENT_VERSION);
+    let client_name = "sp-electrum";
+    let client_version = "0.0.0";
+    let user_agent = format!("/{client_name}:{client_version}/");
 
-    message::NetworkMessage::Version(message_network::VersionMessage::new(
-        protocol_version,
+    let mut version = VersionMessage::new(
         services,
         timestamp as i64,
         addr_recv,
@@ -132,116 +122,8 @@ fn version_msg(own_ip: SocketAddr, peer_ip: SocketAddr) -> message::NetworkMessa
         nonce,
         user_agent,
         start_height,
-    ))
-}
+    );
+    version.version = 60_002;
 
-#[cfg(test)]
-mod tests {
-    use std::{thread, time::Duration};
-
-    use super::*;
-    use bitcoin_local::BlockHash;
-    use bitcoin_p2p_messages::message_blockdata::Inventory;
-    use message::{InventoryPayload, NetworkMessage};
-
-    #[test]
-    fn test_p2p_handshake() {
-        let _ = connect("127.0.0.1:8333", Network::Bitcoin).unwrap();
-    }
-
-    #[test]
-    fn test_listen() {
-        let (mut stream, mut reader, height) =
-            connect("127.0.0.1:18444", Network::Regtest).unwrap();
-
-        println!("Peer at height {height}");
-
-        for _ in 0..10 {
-            if let Ok(msg) = message::RawNetworkMessage::consensus_decode(&mut reader) {
-                match msg.payload() {
-                    NetworkMessage::Ping(nonce) => {
-                        println!("ping");
-                        let pong_msg = NetworkMessage::Pong(*nonce);
-                        let msg = message::RawNetworkMessage::new(Magic::REGTEST, pong_msg);
-                        let _ = stream.write_all(encode::serialize(&msg).as_slice());
-                        println!("pong");
-
-                        thread::sleep(Duration::from_millis(500));
-
-                        let bh = BlockHash::from_str(
-                            "7c754585bf936c292be6438a6aefc3ab508f373db463211800a314c657c360fc",
-                        )
-                        .unwrap();
-
-                        let block = Inventory::Block(bh);
-                        let getdata_msg =
-                            message::NetworkMessage::GetData(InventoryPayload(vec![block]));
-                        let get_block =
-                            message::RawNetworkMessage::new(Magic::REGTEST, getdata_msg);
-                        let _ = stream.write_all(encode::serialize(&get_block).as_slice());
-                    }
-                    NetworkMessage::Inv(p) => {
-                        println!("{p:?}");
-                        let InventoryPayload(payload) = p;
-                        for e in payload {
-                            if let Inventory::Block(_) = e {
-                                let getdata_msg =
-                                    message::NetworkMessage::GetData(InventoryPayload(vec![*e]));
-                                let get_block =
-                                    message::RawNetworkMessage::new(Magic::REGTEST, getdata_msg);
-                                let _ = stream.write_all(encode::serialize(&get_block).as_slice());
-                            }
-                        }
-                    }
-                    NetworkMessage::Block(block) => {
-                        println!("Receive block {}", block.block_hash());
-                    }
-                    NetworkMessage::Alert(_) => {}
-                    // NetworkMessage::GetBlocks(get_blocks_message) => todo!(),
-                    // NetworkMessage::Version(version_message) => todo!(),
-                    // NetworkMessage::Verack => todo!(),
-                    // NetworkMessage::Addr(addr_payload) => todo!(),
-                    // NetworkMessage::GetData(inventory_payload) => todo!(),
-                    // NetworkMessage::NotFound(inventory_payload) => todo!(),
-                    NetworkMessage::GetHeaders(get_headers_message) => todo!(),
-                    // NetworkMessage::MemPool => todo!(),
-                    // NetworkMessage::Tx(transaction) => todo!(),
-                    // NetworkMessage::Headers(headers_message) => todo!(),
-                    // NetworkMessage::SendHeaders => todo!(),
-                    // NetworkMessage::GetAddr => todo!(),
-                    // NetworkMessage::Pong(_) => todo!(),
-                    // NetworkMessage::MerkleBlock(merkle_block) => todo!(),
-                    // NetworkMessage::FilterLoad(filter_load) => todo!(),
-                    // NetworkMessage::FilterAdd(filter_add) => todo!(),
-                    // NetworkMessage::FilterClear => todo!(),
-                    // NetworkMessage::GetCFilters(get_cfilters) => todo!(),
-                    // NetworkMessage::CFilter(cfilter) => todo!(),
-                    // NetworkMessage::GetCFHeaders(get_cfheaders) => todo!(),
-                    // NetworkMessage::CFHeaders(cfheaders) => todo!(),
-                    // NetworkMessage::GetCFCheckpt(get_cfcheckpt) => todo!(),
-                    // NetworkMessage::CFCheckpt(cfcheckpt) => todo!(),
-                    // NetworkMessage::SendCmpct(send_cmpct) => todo!(),
-                    // NetworkMessage::CmpctBlock(cmpct_block) => todo!(),
-                    // NetworkMessage::GetBlockTxn(get_block_txn) => todo!(),
-                    // NetworkMessage::BlockTxn(block_txn) => todo!(),
-                    // NetworkMessage::Reject(reject) => todo!(),
-                    // NetworkMessage::FeeFilter(fee_rate) => todo!(),
-                    // NetworkMessage::WtxidRelay => todo!(),
-                    // NetworkMessage::AddrV2(addr_v2_payload) => todo!(),
-                    // NetworkMessage::SendAddrV2 => todo!(),
-                    // NetworkMessage::Unknown { command, payload } => todo!(),
-                    _ => {
-                        println!("{:?}", msg.payload());
-                    }
-                }
-            }
-
-            // if *reply.payload() == NetworkMessage::Alert(Alert(_)) {
-            //     let _ = stream.write_all(encode::serialize(&getdata_raw).as_slice());
-            // } else {
-            //     println!("{reply:?}");
-            // }
-            // println!("{reply:?}");
-        }
-    }
+    NetworkMessage::Version(version)
 }
