@@ -3,7 +3,8 @@ use std::{
     net::{SocketAddr, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc::{self},
+        Arc, Mutex,
     },
     time::{Duration, SystemTime},
 };
@@ -110,7 +111,10 @@ impl Client {
                             .unwrap();
                     }
                     m @ NetworkMessage::Block(_) => {
-                        sender.send(m).unwrap();
+                        let _ = sender.send(m);
+                    }
+                    NetworkMessage::Addr(a) => {
+                        let _ = sender.send(NetworkMessage::Addr(a.clone()));
                     }
                     _ => {}
                 },
@@ -168,7 +172,51 @@ impl Client {
                     return Ok(Some(block));
                 } else {
                     let elapsed = SystemTime::now().duration_since(send).expect("valid time");
-                    println!("{:?}/{:?}", elapsed, timeout);
+                    if elapsed > timeout {
+                        return Ok(None);
+                    } else {
+                        back_off.snooze();
+                    }
+                }
+                if self.stop.load(Ordering::Relaxed) {
+                    return Err(Error::Stopped);
+                }
+            }
+        } else {
+            Err(Error::Connected)
+        }
+    }
+
+    pub fn get_addr(&mut self) -> Result<Option<Vec<SocketAddr>>, Error> {
+        if !self.is_connected() {
+            return Err(Error::Connected);
+        }
+        let stream = if let Some(stream) = &self.stream {
+            stream.clone()
+        } else {
+            return Err(Error::Connected);
+        };
+        let timeout = self.timeout;
+        let mut back_off = bwk_backoff::Backoff::new_ms(20);
+        if let Some(receiver) = self.receiver.as_mut() {
+            let getdata_msg = message::NetworkMessage::GetAddr;
+            let magic = network_to_magic(self.network);
+            let get_block = message::RawNetworkMessage::new(magic, getdata_msg);
+            let _ = stream
+                .lock()
+                .expect("poisoned")
+                .write_all(encode::serialize(&get_block).as_slice());
+            let send = SystemTime::now();
+
+            loop {
+                if let Ok(NetworkMessage::Addr(vec)) = receiver.try_recv() {
+                    let addresses = vec
+                        .into_iter()
+                        .filter_map(|(_, a)| a.socket_addr().ok())
+                        .collect();
+                    return Ok(Some(addresses));
+                } else {
+                    let elapsed = SystemTime::now().duration_since(send).expect("valid time");
                     if elapsed > timeout {
                         return Ok(None);
                     } else {
@@ -255,9 +303,24 @@ mod tests {
         let len = peers.len();
         for (index, peer) in peers.into_iter().enumerate() {
             println!("{}/{}", index + 1, len);
-            if Client::new(peer, Network::Bitcoin).connect().is_err() {
-                failed += 1;
-            }
+            let client = Client::new(peer, Network::Bitcoin).connect();
+            let mut client = match client {
+                Ok(c) => c,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            let addrs = match client.get_addr() {
+                Ok(Some(a)) => a,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+                _ => continue,
+            };
+
+            println!("received {} peers addresses", addrs.len());
         }
 
         if (failed * 10) > len {
